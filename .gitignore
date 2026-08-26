@@ -1,0 +1,14 @@
+# Compiled files
+*.elc
+*.eln
+
+# Generated autoloads
+*-autoloads.el
+
+# Emacs backup and auto-save files
+*~
+\#*\#
+.\#*
+
+# Agent scratch
+.claude/
