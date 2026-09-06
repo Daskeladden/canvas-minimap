@@ -622,11 +622,15 @@ fontconfig calls the same face \"JetBrains Mono\"."
 (defun canvas-minimap--font-file (family)
   "Path to a TrueType file for FAMILY, via fc-match, or nil."
   (when (executable-find "fc-match")
-    (let ((out (string-trim
-                (with-output-to-string
-                  (with-current-buffer standard-output
-                    (ignore-errors
-                      (call-process "fc-match" nil t nil "-f" "%{file}" family)))))))
+    ;; A pooled buffer keeps the default-directory its last user left;
+    ;; run fc-match from the caller's, which is at least as alive.
+    (let* ((dir default-directory)
+           (out (string-trim
+                 (with-work-buffer
+                   (let ((default-directory dir))
+                     (ignore-errors
+                       (call-process "fc-match" nil t nil "-f" "%{file}" family)))
+                   (buffer-string)))))
       (and (not (string-empty-p out)) (file-readable-p out) out))))
 
 (defun canvas-minimap--active-coverage (family)
@@ -640,7 +644,7 @@ table is used until it arrives."
       (let ((file (canvas-minimap--glyph-file family)))
         (when (file-readable-p file)
           (let ((text (string-trim
-                       (with-temp-buffer
+                       (with-work-buffer
                          (insert-file-contents file)
                          (buffer-string)))))
             (when (= (length text) (canvas-minimap--coverage-length))

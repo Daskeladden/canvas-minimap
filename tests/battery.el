@@ -49,6 +49,16 @@
 (defun battery-skip (name why)
   (battery-say "%-40s SKIP   %s" name why))
 
+(defun battery-buffers-made (thunk)
+  "How many new buffers a call to THUNK creates."
+  (let ((made 0))
+    (advice-add 'generate-new-buffer :before
+                (lambda (&rest _) (setq made (1+ made)))
+                '((name . battery-buffer-count)))
+    (unwind-protect (funcall thunk)
+      (advice-remove 'generate-new-buffer 'battery-buffer-count))
+    made))
+
 ;;;; Getting at the map
 
 (defun battery-state ()
@@ -300,6 +310,63 @@ while the prompt is still up."
                 (dotimes (i 16) (setq sum (+ sum (aref cell i))))
                 sum))))
    (> (funcall ink ?M) (funcall ink ?.) (funcall ink ?\s))))
+
+;; GIVEN a coverage table on disk that has been read once already
+;; WHEN its cache entry is dropped and it is read again
+;; THEN no new buffer is made for it -- the reader reuses a work
+;; buffer (issue #1)
+(battery-check
+ "the coverage reader reuses a buffer"
+ (let* ((canvas-minimap-glyph-directory (make-temp-file "battery-glyphs" t))
+        (family "Battery Reuse Font")
+        (table (make-string (canvas-minimap--coverage-length) ?5)))
+   (unwind-protect
+       (progn
+         (with-temp-file (canvas-minimap--glyph-file family)
+           (insert table))
+         (canvas-minimap--active-coverage family)
+         (remhash family canvas-minimap--glyph-tables)
+         (let* (read
+                (made (battery-buffers-made
+                       (lambda ()
+                         (setq read (canvas-minimap--active-coverage family))))))
+           (and (equal table read) (= 0 made))))
+     (remhash family canvas-minimap--glyph-tables)
+     (delete-directory canvas-minimap-glyph-directory t))))
+
+;; GIVEN fc-match has been asked for a font file once already
+;; WHEN it is asked again
+;; THEN the same readable path comes back, and its output lands in a
+;; reused work buffer, not a fresh one
+(if (executable-find "fc-match")
+    (battery-check
+     "the font finder reuses a buffer"
+     (let* ((warm (canvas-minimap--font-file "monospace"))
+            found
+            (made (battery-buffers-made
+                   (lambda ()
+                     (setq found (canvas-minimap--font-file "monospace"))))))
+       (and warm (equal warm found) (file-readable-p found) (= 0 made))))
+  (battery-skip "the font finder reuses a buffer" "no fc-match"))
+
+;; GIVEN some other pool user left a since-deleted directory behind in
+;; a work buffer
+;; WHEN a font is looked up
+;; THEN it is still found -- fc-match must not run in the stale
+;; directory (issue #1 follow-up)
+(if (executable-find "fc-match")
+    (battery-check
+     "a stale pool directory does not lose the font"
+     (let ((dir (make-temp-file "battery-stale" t)))
+       (unwind-protect
+           (progn
+             (with-work-buffer (setq default-directory dir))
+             (delete-directory dir)
+             (let ((file (canvas-minimap--font-file "monospace")))
+               (and file (file-readable-p file))))
+         ;; Leave the pool wholesome for whoever draws from it next.
+         (with-work-buffer (setq default-directory temporary-file-directory)))))
+  (battery-skip "a stale pool directory does not lose the font" "no fc-match"))
 
 (set-frame-size (selected-frame) 200 45)
 (switch-to-buffer battery-src)
