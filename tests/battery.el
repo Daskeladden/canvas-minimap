@@ -249,6 +249,27 @@ while the prompt is still up."
     (recenter))
   (canvas-minimap--update))
 
+(defun battery-y-of-slot (st slot)
+  "The window pixel row a click lands on to hit ST's SLOT."
+  (let ((lh (canvas-minimap--state-lh st)))
+    (/ (+ (* slot lh) (canvas-minimap--state-top st) (/ lh 2))
+       (canvas-minimap--state-scale st))))
+
+(defun battery-window-slots (st)
+  "Slots of ST drawing the lines its window really shows."
+  (let* ((win (canvas-minimap--state-window st))
+         (cookies (canvas-minimap--state-cookies st))
+         (wstart (with-current-buffer battery-src
+                   (line-number-at-pos (window-start win))))
+         (wend (with-current-buffer battery-src
+                 (line-number-at-pos (window-end win t))))
+         slots)
+    (dotimes (i (canvas-minimap--state-rows st))
+      (let ((line (aref cookies i)))
+        (when (and (integerp line) (<= wstart line wend))
+          (push i slots))))
+    (nreverse slots)))
+
 (defvar battery-width nil)
 (defvar battery-rows nil)
 (defvar battery-left-behind nil)
@@ -466,19 +487,8 @@ while the prompt is still up."
     ;; THEN the tinted band covers the rows drawing the lines in the
     ;; window, and no others
     (let* ((st (battery-state))
-           (win (canvas-minimap--state-window st))
-           (cookies (canvas-minimap--state-cookies st))
-           (wstart (with-current-buffer battery-src
-                     (line-number-at-pos (window-start win))))
-           (wend (with-current-buffer battery-src
-                   (line-number-at-pos (window-end win t))))
            (band (battery-deco-slots st 1))
-           (want (let (slots)
-                   (dotimes (i (canvas-minimap--state-rows st))
-                     (let ((line (aref cookies i)))
-                       (when (and (integerp line) (<= wstart line wend))
-                         (push i slots))))
-                   (nreverse slots))))
+           (want (battery-window-slots st)))
       (battery-check "the band covers what the window shows"
                      (and band (equal band want))
                      (format "%d rows tinted, %d lines in the window"
@@ -692,6 +702,54 @@ while the prompt is still up."
       (battery-check "a small scroll draws only what moved in"
                      (< drawn (/ rows 4))
                      (format "%d of %d rows" drawn rows))))
+
+  (battery-step 0.3
+    ;; GIVEN a settled map three hundred rows tall
+    (battery-jump 700))
+  (battery-step 0.8
+    ;; WHEN the window scrolls a few lines back up
+    ;; THEN the map is moved down rather than drawn again, AND only the
+    ;; lines that came into view at the top are rasterized
+    (let* ((st (battery-state))
+           (rows (canvas-minimap--state-rows st))
+           (drawn (battery-drawn
+                   (lambda ()
+                     (with-selected-window (canvas-minimap--state-window st)
+                       (scroll-down 5))
+                     (canvas-minimap--update)))))
+      (battery-check "a scroll up draws only what moved in"
+                     (< drawn (/ rows 4))
+                     (format "%d of %d rows" drawn rows))
+      ;; AND what the move left is what a redraw from scratch would draw
+      (let ((moved (copy-sequence (canvas-minimap--state-data st))))
+        (canvas-minimap-refresh)
+        (let ((d (battery-differs moved (canvas-minimap--state-data (battery-state)))))
+          (battery-check "a scroll up = fresh render" (eql 0 d)
+                         (format "%d px differ" d))))))
+
+  (battery-step 0.3
+    ;; GIVEN a settled map, the window measured by a redisplay
+    (battery-jump 600)
+    (battery-settle))
+  (battery-step 0.4
+    ;; WHEN the map is dragged up in three steps faster than it can
+    ;; follow, so motion is always queued and no redisplay runs between
+    (let ((st (battery-state)))
+      (dotimes (_ 3)
+        (let ((here (canvas-minimap--slot-of-line
+                     st (with-current-buffer battery-src
+                          (line-number-at-pos
+                           (window-start (canvas-minimap--state-window st))))))
+              (unread-command-events (list '(mouse-movement (nil)))))
+          (canvas-minimap--goto-y st (battery-y-of-slot st (max 0 (- here 8))))))
+      ;; THEN the band still covers the lines the window shows, and no
+      ;; others: it moves with the window rather than stretching
+      (let ((band (battery-deco-slots st 1))
+            (want (battery-window-slots st)))
+        (battery-check "a fast drag keeps the band's height"
+                       (and band (equal band want))
+                       (format "%d rows tinted, %d lines in the window"
+                               (length band) (length want))))))
 
   (battery-step 0.3
     ;; GIVEN a settled map over the lines about to change

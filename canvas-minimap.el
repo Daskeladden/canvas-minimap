@@ -891,6 +891,8 @@ An overlay bound to a window other than WIN is not showing here."
   slot-pixels          ; pixels occupied by one slot
   buffer window        ; source buffer and window the render belongs to
   start                ; buffer line drawn in slot 0 (1-based)
+  shown                ; lines past its first the window showed when last
+                       ; measured, nil until it has been
   cookies              ; per slot: the buffer line drawn there, nil for a
                        ; slot past the end of the buffer, `unknown' when
                        ; nothing has been drawn there yet
@@ -1368,14 +1370,26 @@ matcher over the source buffer cannot wedge the poll."
       (canvas-minimap--yield-to-input
        nil (lambda () (font-lock-ensure beg end))))))
 
-(defun canvas-minimap--window-end (win buf)
-  "Last visible position of WIN, forcing font-lock only if input allows.
-`window-end' with UPDATE fontifies the visible region; a keystroke
-aborts that and we fall back to the cached end, or BUF's `point-max',
-so the poll never wedges on a pathological matcher."
-  (or (canvas-minimap--yield-to-input nil (lambda () (window-end win t)))
-      (window-end win)
-      (with-current-buffer buf (point-max))))
+(defun canvas-minimap--window-end-line (st win buf wstart)
+  "Line of BUF that WIN's display ends on, WSTART being where it starts.
+`window-end' with UPDATE fontifies the visible region, and a keystroke
+aborts that, so the poll never wedges on a pathological matcher.  What
+it measured is kept in ST.  Aborted, the window is taken to show as many
+lines as it did then.  The end redisplay recorded is no substitute: it
+belongs to wherever the window stood when redisplay last ran, and a drag
+moves the window with motion queued the whole way, so redisplay never
+gets in to record another -- paired with the new start, the old end
+stretches the band over both."
+  (let ((pos (canvas-minimap--yield-to-input nil (lambda () (window-end win t)))))
+    (if pos
+        (let ((line (canvas-minimap--line-of buf pos)))
+          (setf (canvas-minimap--state-shown st) (- line wstart))
+          line)
+      (+ wstart (or (canvas-minimap--state-shown st)
+                    (max 0 (- (canvas-minimap--line-of
+                               buf (or (window-end win)
+                                       (with-current-buffer buf (point-max))))
+                              wstart)))))))
 
 ;;;; The layout strip
 
@@ -2343,6 +2357,32 @@ a line ended up once invisible text is being stepped over."
   (or (and line (gethash line (canvas-minimap--state-slot-of st)))
       default))
 
+(defun canvas-minimap--delta (st buf start rows)
+  "Slots ST's drawing moves by for its slice to begin at line START of BUF.
+Slot I then takes what slot I+DELTA holds.  A start the map is drawing
+gives it outright.  A start above the map is walked down from to the
+first line the map draws, counting a slot per visible line on the way:
+exact unless a picture there stands taller than a line, and a miscount
+costs only speed, since each slot is checked against the line it has to
+hold and one that does not match is drawn again.  Nil when the slice
+moved a whole map or more."
+  (let ((old (canvas-minimap--state-start st)))
+    (if (not (and old (< start old)))
+        (canvas-minimap--slot-of-line st start)
+      (with-current-buffer buf
+        (save-excursion
+          (save-restriction
+            (widen)
+            (goto-char (point-min))
+            (forward-line (1- start))
+            (let ((n 0) (line start) found)
+              (while (and line (< n rows)
+                          (not (setq found (canvas-minimap--slot-of-line st line))))
+                (let ((crossed (canvas-minimap--forward-visible-line)))
+                  (setq n (1+ n)
+                        line (and crossed (+ line crossed)))))
+              (and found (- found n)))))))))
+
 (defun canvas-minimap--slice-start (win rows total wstart vis)
   "Buffer line the minimap's first slot should show.
 WIN shows VIS lines starting at line WSTART of a TOTAL-line buffer, and
@@ -2847,7 +2887,8 @@ ST is what that minimap last drew; the state to keep is returned."
     (unless (and (eq buf (canvas-minimap--state-buffer st))
                  (eq win (canvas-minimap--state-window st)))
       (setf (canvas-minimap--state-buffer st) buf
-            (canvas-minimap--state-window st) win)
+            (canvas-minimap--state-window st) win
+            (canvas-minimap--state-shown st) nil)
       (setq fresh t)
       (canvas-minimap--invalidate st))
     (let* ((rows (canvas-minimap--state-rows st))
@@ -2856,8 +2897,7 @@ ST is what that minimap last drew; the state to keep is returned."
                       (widen)
                       (line-number-at-pos (point-max)))))
            (wstart (canvas-minimap--line-of buf (window-start win)))
-           (wend (canvas-minimap--line-of
-                  buf (canvas-minimap--window-end win buf)))
+           (wend (canvas-minimap--window-end-line st win buf wstart))
            (vis (max 1 (1+ (- wend wstart))))
            ;; The window's point, not the buffer's: while a minibuffer is
            ;; reading, the window is not the selected one and the two
@@ -2886,11 +2926,10 @@ ST is what that minimap last drew; the state to keep is returned."
            ;; is walked to over a few frames rather than cut to.
            (start (canvas-minimap--glide st goal fresh))
            (painted fresh))
-      ;; Where the new first line already sits decides the scroll.  Derived
-      ;; rather than subtracted, because with invisible text stepped over a
-      ;; slot is not its start plus its index -- and this is exact whenever
-      ;; the line is still on the map at all.
-      (let ((delta (canvas-minimap--slot-of-line st start)))
+      ;; Where the new first line sits, or would sit, decides the scroll.
+      ;; Derived rather than subtracted, because with invisible text
+      ;; stepped over a slot is not its start plus its index.
+      (let ((delta (canvas-minimap--delta st buf start rows)))
         (cond ((null delta) (canvas-minimap--invalidate st))
               ((/= delta 0)
                (canvas-minimap--shift st delta)
