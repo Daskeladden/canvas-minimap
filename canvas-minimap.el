@@ -2118,6 +2118,20 @@ parameters say so too, but only to whoever reads them.")
                 right-margin-width 0)
     (current-buffer)))
 
+(defun canvas-minimap--map-buffer-p (buf)
+  "Non-nil if BUF is a minimap's own canvas buffer."
+  (and (buffer-live-p buf)
+       (string-prefix-p " *canvas-minimap*" (buffer-name buf))))
+
+(defun canvas-minimap--taken-p (mmwin)
+  "Non-nil if MMWIN has been claimed for somebody else's buffer.
+`display-buffer' reuses a side window in the same slot, so another
+package wanting the same edge seats its buffer in the map's window.
+The window parameters survive that; the buffer does not, and the buffer
+is the side that tells the truth."
+  (and (window-live-p mmwin)
+       (not (canvas-minimap--map-buffer-p (window-buffer mmwin)))))
+
 (defun canvas-minimap--minimap-window-p (win)
   "Non-nil if WIN is a minimap rather than something to draw."
   (and (window-live-p win) (window-parameter win 'canvas-minimap)))
@@ -2201,23 +2215,41 @@ map that is already up."
        (window-parameter mmwin 'canvas-minimap-edge)
        (not (window-at-side-p mmwin canvas-minimap-side))))
 
+(defun canvas-minimap--disown (mmwin)
+  "Drop the map's claim on MMWIN, leaving the window as it stands."
+  (when (window-live-p mmwin)
+    (set-window-parameter mmwin 'canvas-minimap nil)
+    (set-window-parameter mmwin 'canvas-minimap-edge nil)))
+
 (defun canvas-minimap--destroy (mmwin)
-  "Take MMWIN down and forget what it was drawing."
+  "Take MMWIN down and forget what it was drawing.
+A window that was taken over -- it lives, but what it shows stopped
+being a map's buffer -- is left standing with the claim dropped: what
+is in it now belongs to whoever put it there."
   (let ((buf (and (window-live-p mmwin) (window-buffer mmwin))))
     (remhash mmwin canvas-minimap--states)
-    (when (window-live-p mmwin)
-      (set-window-dedicated-p mmwin nil)
-      (ignore-errors (delete-window mmwin)))
-    (when (buffer-live-p buf) (kill-buffer buf))))
+    (if (canvas-minimap--taken-p mmwin)
+        (canvas-minimap--disown mmwin)
+      (when (window-live-p mmwin)
+        (set-window-dedicated-p mmwin nil)
+        (ignore-errors (delete-window mmwin)))
+      (when (canvas-minimap--map-buffer-p buf) (kill-buffer buf)))))
 
 (defun canvas-minimap--show-image (mmwin image)
-  "Put IMAGE in MMWIN's buffer."
-  (with-current-buffer (window-buffer mmwin)
-    (let ((inhibit-read-only t))
-      (erase-buffer)
-      (insert (propertize " " 'display image
-                          'keymap canvas-minimap-image-map
-                          'pointer 'arrow)))))
+  "Put IMAGE in MMWIN's buffer.
+Only the map's own buffer is drawn into: erasing whatever the window
+happens to show would, after a takeover, erase a buffer that was never
+ours -- and through an indirect clone, the buffer it was made from."
+  (let ((buf (window-buffer mmwin)))
+    (unless (canvas-minimap--map-buffer-p buf)
+      (error "canvas-minimap: %s shows %s, not a map's buffer"
+             mmwin (buffer-name buf)))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (propertize " " 'display image
+                            'keymap canvas-minimap-image-map
+                            'pointer 'arrow))))))
 
 (defun canvas-minimap--hide (&optional frame)
   "Take every minimap on FRAME down."
@@ -2904,17 +2936,24 @@ ST is what that minimap last drew; the state to keep is returned."
   st)
 
 (defun canvas-minimap--reap ()
-  "Forget minimaps whose window has gone, and kill what they were showing.
+  "Forget minimaps whose window is gone or taken, and their buffers.
 A window deleted by anything other than `canvas-minimap--destroy' --
 `delete-window' on its parent, a frame closing -- leaves its buffer
-behind with nothing to show it."
+behind with nothing to show it.  A window still alive but showing
+somebody else's buffer was taken over by a `display-buffer' wanting
+the same slot; the claim on it is dropped, and everything in it is
+left strictly alone."
   (let (dead)
     (maphash (lambda (mmwin _st)
-               (unless (window-live-p mmwin) (push mmwin dead)))
+               (when (or (not (window-live-p mmwin))
+                         (canvas-minimap--taken-p mmwin))
+                 (push mmwin dead)))
              canvas-minimap--states)
-    (dolist (mmwin dead) (remhash mmwin canvas-minimap--states)))
+    (dolist (mmwin dead)
+      (canvas-minimap--disown mmwin)
+      (remhash mmwin canvas-minimap--states)))
   (dolist (b (buffer-list))
-    (when (and (string-prefix-p " *canvas-minimap*" (buffer-name b))
+    (when (and (canvas-minimap--map-buffer-p b)
                (not (get-buffer-window b t)))
       (kill-buffer b))))
 

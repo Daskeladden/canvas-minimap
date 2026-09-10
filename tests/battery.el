@@ -59,6 +59,36 @@
       (advice-remove 'generate-new-buffer 'battery-buffer-count))
     made))
 
+(defvar battery-squat-base nil)
+(defvar battery-squat-clone nil)
+(defvar battery-squat-win nil)
+(defvar battery-squat-text nil)
+
+(defun battery-squat ()
+  "Seat an indirect clone of a text buffer in the map's side slot.
+What demap-open does: the same side, the same slot, so `display-buffer'
+reuses the map's window and the map is evicted without being told."
+  (setq battery-squat-base (generate-new-buffer "battery-squat-base"))
+  (with-current-buffer battery-squat-base
+    (dotimes (i 100) (insert (format "precious line %d\n" i))))
+  (setq battery-squat-text (with-current-buffer battery-squat-base
+                             (buffer-string)))
+  (setq battery-squat-clone
+        (make-indirect-buffer battery-squat-base "battery-squatter"))
+  (let ((display-buffer-overriding-action
+         '((display-buffer-in-side-window)
+           (side . right) (slot . 0) (window-width . 20))))
+    (setq battery-squat-win (display-buffer battery-squat-clone)))
+  (set-window-dedicated-p battery-squat-win t))
+
+(defun battery-unsquat ()
+  "Clear the squat away and let the map settle again."
+  (when-let* ((w (get-buffer-window battery-squat-clone t)))
+    (ignore-errors (delete-window w)))
+  (when (buffer-live-p battery-squat-clone) (kill-buffer battery-squat-clone))
+  (when (buffer-live-p battery-squat-base) (kill-buffer battery-squat-base))
+  (canvas-minimap--update))
+
 ;;;; Getting at the map
 
 (defun battery-state ()
@@ -1597,6 +1627,55 @@ while the prompt is still up."
         (battery-check "appended image clicks start below the link"
                        (equal (canvas-minimap--picture-at st x y)
                               (list img 0.0 0.0))))))
+
+  (battery-step 0.4
+    ;; GIVEN a settled map whose side window was taken over the way
+    ;; demap takes it: an indirect clone of somebody else's buffer,
+    ;; seated in the same side slot
+    (battery-squat)
+    ;; WHEN the updates that follow run
+    (dotimes (_ 3) (canvas-minimap--update))
+    ;; THEN the squatter's text is exactly what it was
+    (battery-check "a takeover leaves the squatter's text alone"
+                   (equal (with-current-buffer battery-squat-base
+                            (buffer-string))
+                          battery-squat-text))
+    ;; AND the map has a window of its own again
+    (battery-check "the map rebuilds after a takeover"
+                   (let ((mm (canvas-minimap--frame-window (selected-frame))))
+                     (and mm (string-prefix-p
+                              " *canvas-minimap*"
+                              (buffer-name (window-buffer mm))))))
+    (battery-unsquat))
+
+  (battery-step 0.4
+    ;; GIVEN a map window taken over by somebody else's clone
+    (battery-squat)
+    ;; WHEN the map is told to take that window down
+    (canvas-minimap--destroy battery-squat-win)
+    ;; THEN the squatter and its window are left standing
+    (battery-check "destroy spares a taken window"
+                   (and (window-live-p battery-squat-win)
+                        (buffer-live-p battery-squat-clone)
+                        (eq (window-buffer battery-squat-win)
+                            battery-squat-clone)))
+    (battery-unsquat))
+
+  (battery-step 0.4
+    ;; GIVEN a window showing a buffer that is not the map's own
+    (battery-squat)
+    ;; WHEN the drawer is pointed at it anyway
+    ;; THEN it refuses, and the text is untouched
+    (let ((refused (condition-case nil
+                       (progn (canvas-minimap--show-image battery-squat-win nil)
+                              nil)
+                     (error t))))
+      (battery-check "the drawer refuses a foreign buffer"
+                     (and refused
+                          (equal (with-current-buffer battery-squat-base
+                                   (buffer-string))
+                                 battery-squat-text))))
+    (battery-unsquat))
 
   (setq battery-steps (nreverse battery-steps))
   (battery-run))
