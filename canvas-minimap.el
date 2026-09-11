@@ -849,23 +849,6 @@ so a fringe indicator can be SPEC itself or one element of a list."
                 l (cdr l)))
         res))))
 
-(defun canvas-minimap--fringe-pix (st face)
-  "ARGB32 to draw a fringe indicator carrying FACE with, cached in ST.
-A fringe bitmap is drawn in its face's foreground, so that is what the
-strip should show."
-  (let ((cache (canvas-minimap--state-gutter-colors st)))
-    (or (gethash face cache)
-        (puthash face
-                 (let ((rgb (or (canvas-minimap--rgb
-                                 (canvas-minimap--face-attr face :foreground))
-                                (canvas-minimap--rgb
-                                 (canvas-minimap--face-attr face :background))
-                                (canvas-minimap--rgb
-                                 (face-attribute 'fringe :foreground nil t))
-                                (canvas-minimap--state-fg st))))
-                   (canvas-minimap--argb (nth 0 rgb) (nth 1 rgb) (nth 2 rgb)))
-                 cache))))
-
 (defun canvas-minimap--overlay-fringe-face (ov win)
   "Face of the fringe indicator OV puts on its line, or nil.
 An overlay bound to a window other than WIN is not showing here."
@@ -940,6 +923,28 @@ Keyed weakly: a deleted window takes its state with it.")
 ;; offsets: a hash table turns up where a marker belongs.  They are
 ;; drawings, not settings, so throwing them away costs one redraw.
 (clrhash canvas-minimap--states)
+
+;; Code goes the same way.  Loading inlines each accessor as a slot
+;; number, taken from the struct defined at the time: a function above
+;; the definition, read again, keeps the numbers of the struct this one
+;; replaces.  So nothing that reads a state is defined before it.
+
+(defun canvas-minimap--fringe-pix (st face)
+  "ARGB32 to draw a fringe indicator carrying FACE with, cached in ST.
+A fringe bitmap is drawn in its face's foreground, so that is what the
+strip should show."
+  (let ((cache (canvas-minimap--state-gutter-colors st)))
+    (or (gethash face cache)
+        (puthash face
+                 (let ((rgb (or (canvas-minimap--rgb
+                                 (canvas-minimap--face-attr face :foreground))
+                                (canvas-minimap--rgb
+                                 (canvas-minimap--face-attr face :background))
+                                (canvas-minimap--rgb
+                                 (face-attribute 'fringe :foreground nil t))
+                                (canvas-minimap--state-fg st))))
+                   (canvas-minimap--argb (nth 0 rgb) (nth 1 rgb) (nth 2 rgb)))
+                 cache))))
 
 
 
