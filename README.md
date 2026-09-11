@@ -50,7 +50,7 @@ Or clone it:
 
 | Binding | Action |
 |---|---|
-| `mouse-1`, drag | scroll the source window |
+| `mouse-1`, drag | scroll the source window, with the map held still until you release the button |
 | wheel up/down | scroll the source window |
 | `C-wheel` up/down | widen or narrow the minimap |
 | `mouse-1` on the layout strip | select that window |

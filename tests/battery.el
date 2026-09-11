@@ -255,6 +255,27 @@ while the prompt is still up."
     (/ (+ (* slot lh) (canvas-minimap--state-top st) (/ lh 2))
        (canvas-minimap--state-scale st))))
 
+(defun battery-posn (st slot)
+  "A pointer position over ST's map, on SLOT."
+  (posn-at-x-y 20 (battery-y-of-slot st slot)
+               (canvas-minimap--frame-window (selected-frame))))
+
+(defun battery-drag (st slots probe)
+  "Drag ST's map through SLOTS with the real command, calling PROBE each step.
+The button goes down on the first slot, moves over the rest and comes up
+on the last.  The release the command hands back is dropped."
+  (advice-add 'canvas-minimap--scrub :before (lambda (&rest _) (funcall probe))
+              '((name . battery-drag-probe)))
+  (unwind-protect
+      (progn
+        (setq unread-command-events
+              (append (mapcar (lambda (s) (list 'mouse-movement (battery-posn st s)))
+                              (cdr slots))
+                      (list (list 'mouse-1 (battery-posn st (car (last slots)))))))
+        (canvas-minimap-mouse-drag (list 'down-mouse-1 (battery-posn st (car slots)))))
+    (advice-remove 'canvas-minimap--scrub 'battery-drag-probe)
+    (setq unread-command-events nil)))
+
 (defun battery-picture-buffer (png lines at)
   "A buffer of LINES text lines, line AT showing the picture PNG instead."
   (with-current-buffer (get-buffer-create "pictures.txt")
@@ -288,6 +309,7 @@ while the prompt is still up."
 (defvar battery-width nil)
 (defvar battery-rows nil)
 (defvar battery-left-behind nil)
+(defvar battery-held nil "First line a drag held the map on.")
 (defvar battery-picture-slot nil)
 (defvar battery-picture-line nil)
 (defvar battery-band-row nil)
@@ -765,6 +787,85 @@ while the prompt is still up."
                        (and band (equal band want))
                        (format "%d rows tinted, %d lines in the window"
                                (length band) (length want))))))
+
+  (battery-step 0.3
+    ;; GIVEN a settled map in proportional style
+    (battery-jump 600)
+    (battery-settle))
+  (battery-step 0.4
+    ;; WHEN the button goes down on a row well below the band and the
+    ;; pointer drags on down a few rows before it comes up
+    (let* ((st (battery-state))
+           (win (canvas-minimap--state-window st))
+           (rows (canvas-minimap--state-rows st))
+           (held (canvas-minimap--state-start st))
+           (slots (list (- rows 80) (- rows 70) (- rows 60)))
+           steps)
+      (battery-drag st slots
+                    (lambda ()
+                      (push (cons (canvas-minimap--state-start st)
+                                  (eql (window-end win) (window-end win t)))
+                            steps)))
+      (setq steps (nreverse steps))
+      ;; THEN the map holds still while the button is down
+      (battery-check "a drag holds the map still"
+                     (and steps (seq-every-p (lambda (s) (eql (car s) held)) steps))
+                     (format "first lines %S, was %S" (mapcar #'car steps) held))
+      ;; AND the band ends under the pointer
+      (let* ((band (battery-window-slots st))
+             (middle (/ (+ (car band) (car (last band))) 2)))
+        (battery-check "a drag carries the band under the pointer"
+                       (<= (abs (- middle (car (last slots)))) 1)
+                       (format "band centred on row %d, pointer on row %d"
+                               middle (car (last slots)))))
+      ;; AND the window was redrawn before each step, not only at the end
+      (battery-check "a drag redraws the window as it goes"
+                     (seq-every-p #'cdr steps)
+                     (format "window up to date before steps: %S"
+                             (mapcar #'cdr steps)))
+      (setq battery-held held)))
+  (battery-step 0.4
+    ;; WHEN the button is up and the map is left to settle
+    (canvas-minimap--update)
+    (battery-settle)
+    ;; THEN it catches up: it stands where a proportional map of that
+    ;; window stands, which is not where it was held
+    (let* ((st (battery-state))
+           (win (canvas-minimap--state-window st))
+           (caught (canvas-minimap--state-start st))
+           (wstart (window-start win)))
+      (battery-jump 100)
+      (battery-settle)
+      (set-window-start win wstart)
+      (canvas-minimap--update)
+      (battery-settle)
+      (battery-check "the map catches up after a drag"
+                     (and (not (eql caught battery-held))
+                          (eql caught (canvas-minimap--state-start st)))
+                     (format "caught up to line %S from %S, proportional is %S"
+                             caught battery-held
+                             (canvas-minimap--state-start st)))))
+
+  (battery-step 0.3
+    ;; GIVEN a map settled well up a long buffer
+    (battery-jump 200)
+    (battery-settle))
+  (battery-step 0.4
+    ;; WHEN the window jumps far down, and a row in the middle of the map
+    ;; is clicked while the map is still gliding after it
+    (battery-jump 900)
+    (let* ((st (battery-state))
+           (drawn (canvas-minimap--state-start st))
+           (headed (canvas-minimap--state-anchor st)))
+      (battery-drag st (list (/ (canvas-minimap--state-rows st) 2)) (lambda () nil))
+      ;; THEN the map holds where it was drawn, not where it was headed
+      (battery-check "a click holds a gliding map where it is drawn"
+                     (and (not (eql drawn headed))
+                          (eql drawn (canvas-minimap--state-start st)))
+                     (format "drawn from line %S, headed for %S, now %S"
+                             drawn headed (canvas-minimap--state-start st)))
+      (canvas-minimap--update)
+      (battery-settle)))
 
   (battery-step 0.3
     ;; GIVEN a settled map over the lines about to change
@@ -1888,8 +1989,7 @@ while the prompt is still up."
       (battery-check "a middle map centres the band"
                      (<= (abs (- (car band) want)) 1)
                      (format "band starts on row %S, middle would be %d"
-                             (car band) want)))
-)
+                             (car band) want))))
   (battery-step 0.3
     ;; GIVEN the picture buffer, its window a little below the picture
     (when (get-buffer "pictures.txt")
@@ -1911,9 +2011,49 @@ while the prompt is still up."
                                tall (car band) want)))
       (kill-buffer "pictures.txt"))
     (switch-to-buffer battery-src)
+    (battery-jump 300)
+    (battery-settle))
+  (battery-step 0.4
+    ;; WHEN the button goes down well below the band and drags on down
+    (let* ((st (battery-state))
+           (rows (canvas-minimap--state-rows st))
+           (held (canvas-minimap--state-start st))
+           steps)
+      (battery-drag st (list (- rows 80) (- rows 70) (- rows 60))
+                    (lambda () (push (canvas-minimap--state-start st) steps)))
+      ;; THEN the map holds still while the button is down, as any does
+      (battery-check "a middle map holds still during a drag"
+                     (and steps (seq-every-p (lambda (s) (eql s held)) steps))
+                     (format "first lines %S, was %S" (reverse steps) held))))
+  (battery-step 0.3
+    ;; WHEN a row well below the band is clicked, and the map is left to
+    ;; settle once the button is up
+    (let* ((st (battery-state))
+           (slot (- (canvas-minimap--state-rows st) 40)))
+      (setq battery-held (aref (canvas-minimap--state-cookies st) slot))
+      (battery-drag st (list slot) (lambda () nil))
+      (canvas-minimap--update)
+      (battery-settle)))
+  (battery-step 0.4
+    ;; THEN the window shows the line clicked, AND the map has brought
+    ;; it to its middle
+    (let* ((st (battery-state))
+           (band (battery-window-slots st))
+           (want (/ (- (canvas-minimap--state-rows st) (length band)) 2))
+           (shown (with-current-buffer battery-src
+                    (save-excursion
+                      (goto-char (point-min))
+                      (forward-line (1- battery-held))
+                      (pos-visible-in-window-p
+                       (point) (canvas-minimap--state-window st))))))
+      (battery-check "a click brings its lines to the middle"
+                     (and shown (<= (abs (- (car band) want)) 1))
+                     (format "line %S shown %S, band on row %S, middle %d"
+                             battery-held shown (car band) want)))
     (setq canvas-minimap-scroll-style 'proportional)
     (battery-jump 600)
     (battery-settle))
+
   (setq battery-steps (nreverse battery-steps))
   (battery-run))
 

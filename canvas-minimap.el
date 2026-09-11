@@ -299,9 +299,9 @@ over the map rather than sitting in a band of its own."
 `proportional'  The band stands where the window stands in the whole
                 buffer, the way a scroll bar's thumb does: at the top of
                 the map for the top of the buffer, halfway down for the
-                middle.  The map scrolls under it with every move, so a
-                click brings the line clicked into the window but leaves
-                the band about where it was.
+                middle.  While the button is down on the map, the map
+                holds still so the band stays under the pointer, and it
+                glides back into proportion when the button comes up.
 `free'          The map stays put while the band moves over it.  A band
                 running off an edge moves the map by just enough to keep
                 it on, and one that lands off the map altogether is put
@@ -309,7 +309,10 @@ over the map rather than sitting in a band of its own."
                 clicked, and a drag carries it the way a slider moves.
 `middle'        The band stays in the middle of the map, and the map
                 scrolls under it, except near the start or end of the
-                buffer, where it goes as near the middle as it can."
+                buffer, where it goes as near the middle as it can.
+                While the button is down on the map, the map holds still,
+                and a click glides the lines clicked to the middle once
+                the button comes up."
   :type '(choice (const :tag "Where the window is in the buffer" proportional)
                  (const :tag "Only when the band reaches an edge" free)
                  (const :tag "In the middle of the map" middle)))
@@ -2511,14 +2514,22 @@ by line start, since placement walks the same lines more than once."
                            (if img (nth 1 img) 1))
                      known))))))
 
+(defvar canvas-minimap--dragging nil
+  "Bound while the mouse button is down on the map.
+The map holds still under the pointer then, as a free one does, and
+does not glide, where a glide would be a lag.")
+
 (defun canvas-minimap--goal (st win rows total wstart wend vis)
   "First line ST's map is headed for, by `canvas-minimap-scroll-style'.
 The answer is kept, so a free map knows where it stood.  One that has
 stood nowhere yet starts where a proportional map would, so the band
-first shows where the window is in the buffer."
+first shows where the window is in the buffer.  Any map holds still
+while the button is down on it, and a proportional one catches up
+once the button is up."
   (let ((anchor (canvas-minimap--state-anchor st)))
     (setf (canvas-minimap--state-anchor st)
-          (cond ((and anchor (eq canvas-minimap-scroll-style 'free))
+          (cond ((and anchor (or canvas-minimap--dragging
+                                 (eq canvas-minimap-scroll-style 'free)))
                  (canvas-minimap--free-start
                   anchor rows wstart wend (canvas-minimap--row-counter st win)))
                 ((eq canvas-minimap-scroll-style 'middle)
@@ -2543,9 +2554,6 @@ proportionally, so the minimap thumb walks the whole buffer."
 
 (defvar canvas-minimap--glide-timer nil
   "Timer for the next frame of a glide, or nil when the map has settled.")
-
-(defvar canvas-minimap--dragging nil
-  "Bound while the map is being scrubbed, where a glide would be a lag.")
 
 (defun canvas-minimap--glide (st goal fresh)
   "Line ST should draw in slot 0 now, on its way to GOAL.
@@ -3290,7 +3298,8 @@ to ask for it."
       (if-let* ((jump (canvas-minimap--layout-window-at
                        st (* sc (car xy)) (* sc (cdr xy)))))
           (select-window jump)
-        (canvas-minimap--scrub st xy)
+        (canvas-minimap--hold-map st)
+        (canvas-minimap--drag-step st xy)
         (track-mouse
           (let (ev)
             (while (progn (setq ev (read-event))
@@ -3298,8 +3307,24 @@ to ask for it."
               (let ((posn (event-start ev)))
                 (when (canvas-minimap--minimap-window-p (posn-window posn))
                   (when-let* ((xy (posn-object-x-y posn)))
-                    (canvas-minimap--scrub st xy)))))
+                    (canvas-minimap--drag-step st xy)))))
             (when ev (push ev unread-command-events))))))))
+
+(defun canvas-minimap--hold-map (st)
+  "Hold ST's map where it is drawn, rather than where a glide was taking it.
+A drag keeps the map still under the pointer from where it stands.  In
+the middle of a glide, that is the frame on screen, not the line the
+glide was headed for, which a drag would jump to at once.  A glide frame
+still due does no harm: while the button is down it holds still too."
+  (setf (canvas-minimap--state-anchor st) (canvas-minimap--state-start st)))
+
+(defun canvas-minimap--drag-step (st xy)
+  "Scrub ST's source window to XY, and show it before the next step.
+Redisplay waits while input is pending, and a drag keeps motion queued
+the whole way: left to itself, the window would stand still until the
+pointer does."
+  (canvas-minimap--scrub st xy)
+  (redisplay))
 
 (defun canvas-minimap--scroll (event lines)
   "Scroll the window EVENT's minimap belongs to by LINES."
