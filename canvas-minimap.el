@@ -293,6 +293,27 @@ Nil is the minimap's own background, which leaves the plan floating
 over the map rather than sitting in a band of its own."
   :type '(choice (const :tag "The minimap background" nil) color))
 
+(defcustom canvas-minimap-scroll-style 'proportional
+  "How the map follows the window it is drawing.
+
+`proportional'  The band stands where the window stands in the whole
+                buffer, the way a scroll bar's thumb does: at the top of
+                the map for the top of the buffer, halfway down for the
+                middle.  The map scrolls under it with every move, so a
+                click brings the line clicked into the window but leaves
+                the band about where it was.
+`free'          The map stays put while the band moves over it.  A band
+                running off an edge moves the map by just enough to keep
+                it on, and one that lands off the map altogether is put
+                in the middle.  A click lands the band on the line
+                clicked, and a drag carries it the way a slider moves.
+`middle'        The band stays in the middle of the map, and the map
+                scrolls under it, except near the start or end of the
+                buffer, where it goes as near the middle as it can."
+  :type '(choice (const :tag "Where the window is in the buffer" proportional)
+                 (const :tag "Only when the band reaches an edge" free)
+                 (const :tag "In the middle of the map" middle)))
+
 (defcustom canvas-minimap-smooth-scroll t
   "When non-nil, glide the minimap to a new position rather than jumping.
 A jump across the buffer -- `consult-line', imenu, an xref,
@@ -876,6 +897,8 @@ An overlay bound to a window other than WIN is not showing here."
   start                ; buffer line drawn in slot 0 (1-based)
   shown                ; lines past its first the window showed when last
                        ; measured, nil until it has been
+  anchor               ; the first line the slice is headed for, which a
+                       ; glide may not have reached yet
   cookies              ; per slot: the buffer line drawn there, nil for a
                        ; slot past the end of the buffer, `unknown' when
                        ; nothing has been drawn there yet
@@ -2375,18 +2398,129 @@ moved a whole map or more."
     (if (not (and old (< start old)))
         (canvas-minimap--slot-of-line st start)
       (with-current-buffer buf
-        (save-excursion
-          (save-restriction
-            (widen)
-            (goto-char (point-min))
-            (forward-line (1- start))
-            (let ((n 0) (line start) found)
-              (while (and line (< n rows)
-                          (not (setq found (canvas-minimap--slot-of-line st line))))
-                (let ((crossed (canvas-minimap--forward-visible-line)))
-                  (setq n (1+ n)
-                        line (and crossed (+ line crossed)))))
-              (and found (- found n)))))))))
+        (save-restriction
+          (widen)
+          (let* ((found nil)
+                 (n (canvas-minimap--walk-visible
+                     start rows
+                     (lambda (line)
+                       (setq found (canvas-minimap--slot-of-line st line))))))
+            (and n (- found n))))))))
+
+(defun canvas-minimap--walk-visible (line limit stop &optional rows-of)
+  "Rows down visible lines from buffer LINE to the first one STOP accepts.
+STOP is called with each line reached, LINE itself first.  ROWS-OF says
+how many rows the line at point takes, and without it each takes one.
+Nil when LIMIT rows go by, or the buffer ends, before STOP says yes."
+  (save-excursion
+    (goto-char (point-min))
+    (forward-line (1- line))
+    (let ((n 0))
+      (while (and line (< n limit) (not (funcall stop line)))
+        (setq n (+ n (if rows-of (funcall rows-of) 1)))
+        (let ((crossed (canvas-minimap--forward-visible-line)))
+          (setq line (and crossed (+ line crossed)))))
+      (and line (< n limit) n))))
+
+(defun canvas-minimap--visible-offset (from to limit &optional rows-of)
+  "Row buffer line TO lands on in a map whose first line is FROM.
+Nil when that is LIMIT rows down or more.  ROWS-OF is as for
+`canvas-minimap--walk-visible'."
+  (canvas-minimap--walk-visible from limit (lambda (line) (>= line to)) rows-of))
+
+(defun canvas-minimap--back-lines (line n &optional rows-of)
+  "Buffer line N rows of visible lines above LINE, or the first line.
+ROWS-OF says how many rows the line at point takes, and without it each
+takes one.  A line that would carry the count past N is left out, so
+LINE lands no more than N rows below the answer."
+  (save-excursion
+    (goto-char (point-min))
+    (forward-line (1- line))
+    (let ((i 0) (going t))
+      (while (and going (< i n))
+        (let ((here (point)))
+          (if (not (canvas-minimap--back-visible-line))
+              (setq going nil)
+            (let ((rows (if rows-of (funcall rows-of) 1)))
+              (if (> (+ i rows) n)
+                  (setq going nil i n)
+                (setq i (+ i rows)))
+              (unless going (goto-char here))))))
+      (line-number-at-pos (point)))))
+
+(defun canvas-minimap--last-start (rows &optional rows-of)
+  "Latest first line that still fills ROWS rows down to the buffer's end.
+A final newline ends the last line rather than starting another, and
+the empty line after it is not one the map draws.  ROWS-OF is as for
+`canvas-minimap--back-lines'."
+  (canvas-minimap--back-lines
+   (line-number-at-pos (if (eq (char-before (point-max)) ?\n)
+                           (1- (point-max))
+                         (point-max)))
+   (1- rows) rows-of))
+
+(defun canvas-minimap--middle-start (rows wstart wend &optional rows-of)
+  "First line of a ROWS-row map with the window's lines WSTART to WEND in
+its middle.  Near the start or end of the buffer the band goes as near
+the middle as the buffer lets it.  A band taller than the map shows from
+its top.  ROWS-OF says how many rows the line at point takes, as the
+map draws it.  Worked out in the current buffer, widened by the caller."
+  (let ((span (canvas-minimap--visible-offset wstart wend rows rows-of)))
+    (min (canvas-minimap--last-start rows rows-of)
+         (if (or (null span) (>= (1+ span) rows))
+             wstart
+           (canvas-minimap--back-lines
+            wstart (/ (- rows (1+ span)) 2) rows-of)))))
+
+(defun canvas-minimap--free-start (anchor rows wstart wend &optional rows-of)
+  "First line of a ROWS-row map that stays at ANCHOR until the band leaves.
+The band covers the window's lines WSTART to WEND.  One running off an
+edge moves the map by just enough to keep it on, and one that lands off
+the map altogether is put in the middle, the way a window recenters
+rather than scroll a long way.  A band taller than the map shows from
+its top.  ROWS-OF says how many rows the line at point takes, as the
+map draws it.  Worked out in the current buffer, widened by the caller."
+  (let ((span (canvas-minimap--visible-offset wstart wend rows rows-of)))
+    (if (or (null span) (>= (1+ span) rows)        ; taller than the map
+            (< wend anchor)                         ; all above it
+            (and (>= wstart anchor)                 ; all below it
+                 (null (canvas-minimap--visible-offset
+                        anchor wstart rows rows-of))))
+        (canvas-minimap--middle-start rows wstart wend rows-of)
+      (min (canvas-minimap--last-start rows rows-of)
+           (cond ((< wstart anchor) wstart)
+                 ((canvas-minimap--visible-offset anchor wend rows rows-of)
+                  anchor)
+                 (t (canvas-minimap--back-lines wend (1- rows) rows-of)))))))
+
+(defun canvas-minimap--row-counter (st win)
+  "A function giving the rows the line at point takes on ST's map.
+A line with a picture on it stands as tall as the picture, as the map
+draws it for WIN, and any other line takes one row.  Answers are kept
+by line start, since placement walks the same lines more than once."
+  (let ((known (make-hash-table :test 'eql)))
+    (lambda ()
+      (let ((beg (point)))
+        (or (gethash beg known)
+            (puthash beg (let ((img (canvas-minimap--line-image
+                                     st beg (line-end-position) win)))
+                           (if img (nth 1 img) 1))
+                     known))))))
+
+(defun canvas-minimap--goal (st win rows total wstart wend vis)
+  "First line ST's map is headed for, by `canvas-minimap-scroll-style'.
+The answer is kept, so a free map knows where it stood.  One that has
+stood nowhere yet starts where a proportional map would, so the band
+first shows where the window is in the buffer."
+  (let ((anchor (canvas-minimap--state-anchor st)))
+    (setf (canvas-minimap--state-anchor st)
+          (cond ((and anchor (eq canvas-minimap-scroll-style 'free))
+                 (canvas-minimap--free-start
+                  anchor rows wstart wend (canvas-minimap--row-counter st win)))
+                ((eq canvas-minimap-scroll-style 'middle)
+                 (canvas-minimap--middle-start
+                  rows wstart wend (canvas-minimap--row-counter st win)))
+                (t (canvas-minimap--slice-start win rows total wstart vis))))))
 
 (defun canvas-minimap--slice-start (win rows total wstart vis)
   "Buffer line the minimap's first slot should show.
@@ -2401,13 +2535,7 @@ proportionally, so the minimap thumb walks the whole buffer."
                   (max 0 (round (* frac (max 0 (- rows (min vis rows))))))))))
     ;; Back up LEAD *visible* lines from the window's first line, so the
     ;; slice is measured in the lines the minimap will actually draw.
-    (save-excursion
-      (goto-char (point-min))
-      (forward-line (1- wstart))
-      (let ((n 0))
-        (while (and (< n lead) (canvas-minimap--back-visible-line))
-          (setq n (1+ n))))
-      (line-number-at-pos (point)))))
+    (canvas-minimap--back-lines wstart lead)))
 
 (defvar canvas-minimap--glide-timer nil
   "Timer for the next frame of a glide, or nil when the map has settled.")
@@ -2893,7 +3021,8 @@ ST is what that minimap last drew; the state to keep is returned."
                  (eq win (canvas-minimap--state-window st)))
       (setf (canvas-minimap--state-buffer st) buf
             (canvas-minimap--state-window st) win
-            (canvas-minimap--state-shown st) nil)
+            (canvas-minimap--state-shown st) nil
+            (canvas-minimap--state-anchor st) nil)
       (setq fresh t)
       (canvas-minimap--invalidate st))
     (let* ((rows (canvas-minimap--state-rows st))
@@ -2926,7 +3055,7 @@ ST is what that minimap last drew; the state to keep is returned."
                    (save-excursion
                      (save-restriction
                        (widen)
-                       (canvas-minimap--slice-start win rows total wstart vis)))))
+                       (canvas-minimap--goal st win rows total wstart wend vis)))))
            ;; Where the slice is drawn is not where it is headed: a jump
            ;; is walked to over a few frames rather than cut to.
            (start (canvas-minimap--glide st goal fresh))
@@ -3236,7 +3365,8 @@ to ask for it."
         ("va" "Alpha" canvas-minimap-viewport-alpha
          :needs (canvas-minimap-viewport-style tint both))
         ("vo" "Outline colour" canvas-minimap-viewport-outline-color
-         :needs (canvas-minimap-viewport-style outline both)))
+         :needs (canvas-minimap-viewport-style outline both))
+        ("vf" "Following" canvas-minimap-scroll-style))
        ("Point"
         ("pp" "Show" canvas-minimap-show-point)
         ("pc" "Colour" canvas-minimap-point-color :needs (canvas-minimap-show-point t))

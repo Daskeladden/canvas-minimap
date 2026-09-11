@@ -255,13 +255,28 @@ while the prompt is still up."
     (/ (+ (* slot lh) (canvas-minimap--state-top st) (/ lh 2))
        (canvas-minimap--state-scale st))))
 
+(defun battery-picture-buffer (png lines at)
+  "A buffer of LINES text lines, line AT showing the picture PNG instead."
+  (with-current-buffer (get-buffer-create "pictures.txt")
+    (erase-buffer)
+    (dotimes (i lines) (insert (format "text line %d\n" i)))
+    (goto-char (point-min))
+    (forward-line (1- at))
+    (put-text-property (point) (line-end-position) 'display (create-image png))
+    (goto-char (point-min))
+    (current-buffer)))
+
+(defun battery-line-rows (st line)
+  "How many of ST's rows draw buffer LINE."
+  (cl-count line (canvas-minimap--state-cookies st)))
+
 (defun battery-window-slots (st)
   "Slots of ST drawing the lines its window really shows."
   (let* ((win (canvas-minimap--state-window st))
          (cookies (canvas-minimap--state-cookies st))
-         (wstart (with-current-buffer battery-src
+         (wstart (with-current-buffer (window-buffer win)
                    (line-number-at-pos (window-start win))))
-         (wend (with-current-buffer battery-src
+         (wend (with-current-buffer (window-buffer win)
                  (line-number-at-pos (window-end win t))))
          slots)
     (dotimes (i (canvas-minimap--state-rows st))
@@ -1735,6 +1750,170 @@ while the prompt is still up."
                                  battery-squat-text))))
     (battery-unsquat))
 
+  (battery-step 0.3
+    ;; GIVEN free scrolling, over a settled map of a long buffer
+    (setq canvas-minimap-scroll-style 'free)
+    (switch-to-buffer battery-src)
+    (battery-jump 600)
+    (battery-settle))
+  (battery-step 0.4
+    ;; WHEN a line well below the band is clicked
+    (let* ((st (battery-state))
+           (rows (canvas-minimap--state-rows st))
+           (start (canvas-minimap--state-start st))
+           (slot (- rows 60)))
+      (canvas-minimap--goto-y st (battery-y-of-slot st slot))
+      ;; THEN the map stays where it is
+      (battery-check "a free map stays put under a click"
+                     (eql start (canvas-minimap--state-start st))
+                     (format "first line %S, was %S"
+                             (canvas-minimap--state-start st) start))
+      ;; AND the band lands on the row that was clicked
+      (let* ((band (battery-window-slots st))
+             (middle (/ (+ (car band) (car (last band))) 2)))
+        (battery-check "a click puts the free band where it lands"
+                       (<= (abs (- middle slot)) 1)
+                       (format "band centred on row %d, clicked row %d"
+                               middle slot)))))
+  (battery-step 0.4
+    ;; WHEN the window scrolls on down, past the map's bottom edge
+    (let ((st (battery-state)))
+      (with-selected-window (canvas-minimap--state-window st)
+        (scroll-up 50))
+      (canvas-minimap--update)
+      (battery-settle)
+      ;; THEN the map follows by just enough to keep the band on it: the
+      ;; window's last line is drawn on the map's last row
+      (let* ((rows (canvas-minimap--state-rows st))
+             (drawn (aref (canvas-minimap--state-cookies st) (1- rows)))
+             (last (with-current-buffer battery-src
+                     (line-number-at-pos
+                      (window-end (canvas-minimap--state-window st) t)))))
+        (battery-check "a free band pushes the map at its edge"
+                       (eql drawn last)
+                       (format "last row draws line %S, window ends on %S"
+                               drawn last)))))
+  (battery-step 0.4
+    ;; WHEN the window jumps far up, to lines the map is not drawing
+    (battery-jump 250)
+    (battery-settle)
+    ;; THEN the band settles in the middle of the map
+    (let* ((st (battery-state))
+           (band (battery-window-slots st))
+           (want (/ (- (canvas-minimap--state-rows st) (length band)) 2)))
+      (battery-check "a far jump centres the free band"
+                     (<= (abs (- (car band) want)) 1)
+                     (format "band starts on row %S, middle would be %d"
+                             (car band) want))))
+
+  (battery-step 0.3
+    ;; GIVEN free scrolling over a buffer with a picture on line 110, the
+    ;; map at the top of it
+    (let ((png (expand-file-name "images/splash.png" data-directory)))
+      (when (file-readable-p png)
+        (switch-to-buffer (battery-picture-buffer png 600 110))
+        (battery-jump 1)
+        (battery-settle))))
+  (battery-step 0.4
+    ;; WHEN the window moves down until its last line would still be on
+    ;; the map if the picture took one row, which it does not
+    (if (not (get-buffer "pictures.txt"))
+        (battery-skip "a picture's rows push a free map along" "no image to draw")
+      (let* ((st (battery-state))
+             (win (canvas-minimap--state-window st))
+             (tall (battery-line-rows st 110))
+             (last (- (1+ (canvas-minimap--state-rows st)) (/ tall 2)))
+             (span (with-current-buffer "pictures.txt"
+                     (- (line-number-at-pos (window-end win t))
+                        (line-number-at-pos (window-start win))))))
+        (with-current-buffer "pictures.txt"
+          (set-window-start win (save-excursion
+                                  (goto-char (point-min))
+                                  (forward-line (- last span 1))
+                                  (point))))
+        (canvas-minimap--update)
+        (battery-settle)
+        ;; THEN the map moves along to take the window's last line in
+        (let ((wend (with-current-buffer "pictures.txt"
+                      (line-number-at-pos (window-end win t)))))
+          (battery-check "a picture's rows push a free map along"
+                         (and (> tall 1) (canvas-minimap--slot-of-line st wend))
+                         (format "picture %d rows, line %d on row %S" tall wend
+                                 (canvas-minimap--slot-of-line st wend))))))
+    (switch-to-buffer battery-src)
+    (battery-jump 600)
+    (battery-settle))
+
+  (battery-step 0.3
+    ;; GIVEN a free map settled near the end of one long buffer
+    (battery-jump 1100)
+    (battery-settle))
+  (battery-step 0.4
+    ;; WHEN the window turns to another long buffer, near its top
+    (let ((other (get-buffer-create "other.el")))
+      (with-current-buffer other
+        (emacs-lisp-mode)
+        (dotimes (i 1200) (insert (format ";; other %d\n" i))))
+      (switch-to-buffer other)
+      (battery-jump 200)
+      (battery-settle)
+      ;; THEN its map starts where a proportional one would, not where
+      ;; the last buffer's map stood
+      (let* ((st (battery-state))
+             (free (canvas-minimap--state-start st)))
+        (setq canvas-minimap-scroll-style 'proportional)
+        (canvas-minimap--update)
+        (battery-settle)
+        (battery-check "a new buffer's free map starts in proportion"
+                       (eql free (canvas-minimap--state-start st))
+                       (format "free started on line %S, proportional on %S"
+                               free (canvas-minimap--state-start st))))
+      (switch-to-buffer battery-src)
+      (kill-buffer other)
+      (battery-jump 600)
+      (battery-settle)))
+
+  (battery-step 0.3
+    ;; GIVEN middle scrolling, over a long buffer whose window is a
+    ;; quarter of the way down, where a proportional map would put the
+    ;; band nearer the top
+    (setq canvas-minimap-scroll-style 'middle)
+    (battery-jump 300)
+    (battery-settle))
+  (battery-step 0.4
+    ;; THEN the band sits in the middle of the map
+    (let* ((st (battery-state))
+           (band (battery-window-slots st))
+           (want (/ (- (canvas-minimap--state-rows st) (length band)) 2)))
+      (battery-check "a middle map centres the band"
+                     (<= (abs (- (car band) want)) 1)
+                     (format "band starts on row %S, middle would be %d"
+                             (car band) want)))
+)
+  (battery-step 0.3
+    ;; GIVEN the picture buffer, its window a little below the picture
+    (when (get-buffer "pictures.txt")
+      (switch-to-buffer "pictures.txt")
+      (battery-jump 172)
+      (battery-settle)))
+  (battery-step 0.4
+    ;; THEN the band is still in the middle: the picture above it counts
+    ;; for the rows it stands, not for one
+    (if (not (get-buffer "pictures.txt"))
+        (battery-skip "a middle map counts a picture's rows" "no image to draw")
+      (let* ((st (battery-state))
+             (tall (battery-line-rows st 110))
+             (band (battery-window-slots st))
+             (want (/ (- (canvas-minimap--state-rows st) (length band)) 2)))
+        (battery-check "a middle map counts a picture's rows"
+                       (and (> tall 1) (<= (abs (- (car band) want)) 1))
+                       (format "picture %d rows, band on row %S, middle %d"
+                               tall (car band) want)))
+      (kill-buffer "pictures.txt"))
+    (switch-to-buffer battery-src)
+    (setq canvas-minimap-scroll-style 'proportional)
+    (battery-jump 600)
+    (battery-settle))
   (setq battery-steps (nreverse battery-steps))
   (battery-run))
 

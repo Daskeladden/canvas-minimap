@@ -8,7 +8,7 @@ EMACS ?= emacs
 # The checks that need no canvas.
 test:
 	$(EMACS) -Q --batch -L . -L tests \
-	  -l tests/guards.el -l tests/headers.el \
+	  -l tests/guards.el -l tests/headers.el -l tests/placement.el \
 	  -l tests/reload.el \
 	  --eval '(ert-run-tests-batch-and-exit)'
 

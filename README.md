@@ -99,6 +99,7 @@ settings:
 | `canvas-minimap-layout-height` | nil | height of the layout strip; `auto` is a quarter of the width |
 | `canvas-minimap-layout-always` | nil | show the layout strip even with a single window |
 | `canvas-minimap-viewport-style` | `tint` | viewport highlight style: `tint`, `outline`, or `both` |
+| `canvas-minimap-scroll-style` | `proportional` | `proportional` follows the window's place in the buffer, `free` scrolls only at an edge, and `middle` keeps the highlight centered |
 | `canvas-minimap-smooth-scroll` | t | animate jumps |
 | `canvas-minimap-highlight-matches` | t | mark the lines a completion matches |
 | `canvas-minimap-image-thumbnails` | t | downsample images, rather than draw a block |
@@ -173,7 +174,7 @@ make battery    # draws for real, needs a graphical display
 ```
 
 `make test` runs the headless checks for input guards, the thumbnail and click
-hooks, package headers, and the licence file.
+hooks, `free` scrolling, package headers, and the licence file.
 
 `make battery` exercises rendering, editing, folding, narrowing, mouse input
 and the options menu. It compares incremental rendering with a full redraw.
