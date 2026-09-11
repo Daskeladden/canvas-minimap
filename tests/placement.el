@@ -97,6 +97,30 @@ rows 11 to 15."
     (canvas-minimap-test-fold 60 89)
     (should (= 50 (canvas-minimap--free-start 50 20 90 94)))))
 
+(ert-deftest canvas-minimap-stepping-back-over-a-fold-lands-above-it ()
+  "GIVEN 200 lines with lines 90 to 99 hidden, the fold beginning at the
+start of a line
+WHEN the map steps back one visible line from line 100
+THEN it lands on line 89, just above the fold, not at the top of the
+buffer."
+  (canvas-minimap-test-with-lines 200
+    (canvas-minimap-test-fold 90 99)
+    (should (= 89 (canvas-minimap--back-lines 100 1)))))
+
+(ert-deftest canvas-minimap-stepping-back-over-an-outline-fold ()
+  "GIVEN a heading on line 2 whose body is hidden from the end of the
+heading line, the way an org fold is, below a visible line 1
+WHEN the map steps back one visible line from the next heading
+THEN it lands on the folded heading, and not on the line above it."
+  (with-temp-buffer
+    (insert "intro\n* head\nbody 1\nbody 2\n* next\n")
+    (goto-char (point-min))
+    (forward-line 1)
+    (end-of-line)
+    (put-text-property (point) (progn (forward-line 3) (1- (point)))
+                       'invisible t)
+    (should (= 2 (canvas-minimap--back-lines 5 1)))))
+
 (ert-deftest canvas-minimap-middle-centres-the-band ()
   "GIVEN a 20-row map over 200 lines
 WHEN the window shows lines 100 to 105
@@ -126,6 +150,15 @@ WHEN the window shows 31 lines, more than the map has rows
 THEN the map starts on the window's first line."
   (canvas-minimap-test-with-lines 200
     (should (= 60 (canvas-minimap--middle-start 20 60 90)))))
+
+(ert-deftest canvas-minimap-middle-counts-only-the-lines-it-draws ()
+  "GIVEN a 20-row map over 200 lines, with lines 90 to 99 folded
+WHEN the window shows lines 100 to 105
+THEN the seven rows above the band hold lines 83 to 89: the folded
+lines take none."
+  (canvas-minimap-test-with-lines 200
+    (canvas-minimap-test-fold 90 99)
+    (should (= 83 (canvas-minimap--middle-start 20 100 105)))))
 
 (defun canvas-minimap-test-picture (line rows)
   "A row counter for a buffer whose LINE stands ROWS rows tall."

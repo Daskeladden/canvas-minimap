@@ -2369,13 +2369,17 @@ over rather than drawn."
     (and (not (eobp)) (count-lines from (point)))))
 
 (defun canvas-minimap--back-visible-line ()
-  "Move to the start of the previous visible line.  Return nil at bob."
+  "Move to the start of the previous visible line.  Return nil at bob.
+A hidden line is left for the start of the hidden run it is in, and a
+run that begins at the start of a line for the line above it.  Scanning
+back from the line itself would read the visible newline before such a
+run and go on past every visible line above it."
   (if (bobp)
       nil
     (forward-line -1)
     (while (and (not (bobp)) (not (canvas-minimap--line-visible-p)))
-      (goto-char (previous-single-char-property-change (point) 'invisible))
-      (forward-line 0))
+      (goto-char (previous-single-char-property-change (1+ (point)) 'invisible))
+      (forward-line (if (bolp) -1 0)))
     t))
 
 (defun canvas-minimap--slot-of-line (st line &optional default)
