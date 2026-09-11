@@ -260,21 +260,44 @@ while the prompt is still up."
   (posn-at-x-y 20 (battery-y-of-slot st slot)
                (canvas-minimap--frame-window (selected-frame))))
 
-(defun battery-drag (st slots probe)
+(defun battery-posn-below (px)
+  "A pointer position PX pixels below the bottom of the frame's map."
+  (let ((edges (window-inside-pixel-edges
+                (canvas-minimap--frame-window (selected-frame)))))
+    (posn-at-x-y (+ (nth 0 edges) 10) (+ (nth 3 edges) px) (selected-frame))))
+
+(defun battery-drag (st slots probe &optional hold)
   "Drag ST's map through SLOTS with the real command, calling PROBE each step.
 The button goes down on the first slot, moves over the rest and comes up
-on the last.  The release the command hands back is dropped."
+on the last.  A slot can also be a position of its own.  With HOLD, the
+pointer rests on the last for that many seconds before the button comes
+up.  The release the command hands back is dropped."
   (advice-add 'canvas-minimap--scrub :before (lambda (&rest _) (funcall probe))
               '((name . battery-drag-probe)))
+  (advice-add 'canvas-minimap--drag-step :after
+              (lambda (st &rest _) (setq battery-after-step (battery-window-line st)))
+              '((name . battery-drag-step)))
   (unwind-protect
-      (progn
+      (let* ((posns (mapcar (lambda (s) (if (integerp s) (battery-posn st s) s))
+                            slots))
+             (release (list 'mouse-1 (car (last posns)))))
         (setq unread-command-events
-              (append (mapcar (lambda (s) (list 'mouse-movement (battery-posn st s)))
-                              (cdr slots))
-                      (list (list 'mouse-1 (battery-posn st (car (last slots)))))))
-        (canvas-minimap-mouse-drag (list 'down-mouse-1 (battery-posn st (car slots)))))
+              (append (mapcar (lambda (p) (list 'mouse-movement p)) (cdr posns))
+                      (unless hold (list release))))
+        (when hold
+          (run-at-time hold nil (lambda ()
+                                  (setq unread-command-events
+                                        (append unread-command-events
+                                                (list release))))))
+        (canvas-minimap-mouse-drag (list 'down-mouse-1 (car posns))))
     (advice-remove 'canvas-minimap--scrub 'battery-drag-probe)
+    (advice-remove 'canvas-minimap--drag-step 'battery-drag-step)
     (setq unread-command-events nil)))
+
+(defun battery-window-line (st)
+  "The line ST's source window starts on."
+  (with-current-buffer battery-src
+    (line-number-at-pos (window-start (canvas-minimap--state-window st)))))
 
 (defun battery-picture-buffer (png lines at)
   "A buffer of LINES text lines, line AT showing the picture PNG instead."
@@ -310,6 +333,7 @@ on the last.  The release the command hands back is dropped."
 (defvar battery-rows nil)
 (defvar battery-left-behind nil)
 (defvar battery-held nil "First line a drag held the map on.")
+(defvar battery-after-step nil "Line the source window started on after the last drag step.")
 (defvar battery-picture-slot nil)
 (defvar battery-picture-line nil)
 (defvar battery-band-row nil)
@@ -866,6 +890,82 @@ on the last.  The release the command hands back is dropped."
                              drawn headed (canvas-minimap--state-start st)))
       (canvas-minimap--update)
       (battery-settle)))
+
+  (battery-step 0.3
+    ;; GIVEN a settled map with room to scroll either way
+    (battery-jump 600)
+    (battery-settle))
+  (battery-step 0.4
+    ;; WHEN the pointer is dragged down past the map's bottom edge, onto
+    ;; the echo area, and held there before the button comes up
+    (let ((st (battery-state)))
+      (battery-drag st (list (- (canvas-minimap--state-rows st) 80)
+                             (battery-posn-below 5))
+                    (lambda () nil) 0.6)
+      ;; THEN the window kept scrolling down while the pointer was held
+      (let ((moved (- (battery-window-line st) battery-after-step)))
+        (battery-check "holding past the bottom edge keeps scrolling"
+                       (>= moved 10)
+                       (format "moved %d lines while held" moved)))))
+  (battery-step 0.4
+    ;; WHEN the pointer is dragged up onto the map's top row and held
+    (let ((st (battery-state)))
+      (battery-drag st (list 80 0) (lambda () nil) 0.6)
+      ;; THEN the window kept scrolling up while the pointer was held
+      (let ((moved (- battery-after-step (battery-window-line st))))
+        (battery-check "holding on the top edge keeps scrolling"
+                       (>= moved 10)
+                       (format "moved %d lines while held" moved)))))
+
+  (battery-step 0.3
+    ;; GIVEN a settled map, and a window slow to scroll: every step it
+    ;; takes costs 100 ms more, as a garbage collection or a remote
+    ;; display adds
+    (battery-jump 600)
+    (battery-settle))
+  (battery-step 0.4
+    ;; WHEN the pointer is dragged onto the bottom row and held there
+    (let ((st (battery-state))
+          (spans nil))
+      (advice-add 'canvas-minimap--scroll-source :after
+                  (lambda (&rest _) (sleep-for 0.1))
+                  '((name . battery-slow)))
+      (advice-add 'canvas-minimap--edge-step :around
+                  (lambda (orig &rest args)
+                    (let ((began (float-time)))
+                      (prog1 (apply orig args)
+                        (push (cons began (float-time)) spans))))
+                  '((name . battery-spans)))
+      (unwind-protect
+          (battery-drag st (list (- (canvas-minimap--state-rows st) 80)
+                                 (1- (canvas-minimap--state-rows st)))
+                        (lambda () nil) 0.6)
+        (advice-remove 'canvas-minimap--scroll-source 'battery-slow)
+        (advice-remove 'canvas-minimap--edge-step 'battery-spans))
+      ;; THEN a slow step is followed by the next at once, since it is
+      ;; already due, rather than by a full interval of waiting
+      (let* ((spans (nreverse spans))
+             (idle (sort (cl-mapcar (lambda (a b) (round (* 1000 (- (car b) (cdr a)))))
+                                    spans (cdr spans))
+                         #'<))
+             (median (and idle (nth (/ (length idle) 2) idle))))
+        (battery-check "slow steps keep to the clock"
+                       (and median (< median 20))
+                       (format "idle between steps %S ms" idle))
+        ;; AND the distance is what the time held earns, no more and no
+        ;; less, however slow the steps are: the speed curve over the
+        ;; time from reaching the edge to the last step
+        (let* ((held (and spans (+ (- (car (car (last spans))) (car (car spans)))
+                                   canvas-minimap--edge-interval)))
+               (earned (and held (+ (* canvas-minimap--edge-start-speed held)
+                                    (* 0.5 canvas-minimap--edge-acceleration
+                                       held held))))
+               (moved (- (battery-window-line st) battery-after-step)))
+          (battery-check "slow steps keep the speed"
+                         (and earned (<= (abs (- moved earned))
+                                         (max 2 (* 0.1 earned))))
+                         (format "moved %d lines, %.0f earned in %.2f s"
+                                 moved (or earned 0) (or held 0)))))))
 
   (battery-step 0.3
     ;; GIVEN a settled map over the lines about to change

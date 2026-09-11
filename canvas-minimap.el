@@ -3262,13 +3262,17 @@ for the layout to move under the reader."
 
 ;;;; Mouse
 
+(defun canvas-minimap--row-at (st y)
+  "Row of ST's map that window pixel row Y is on, counting past either end.
+The pointer arrives in window pixels; the canvas may be finer."
+  (floor (- (* y (canvas-minimap--state-scale st))
+            (canvas-minimap--state-top st))
+         (canvas-minimap--state-lh st)))
+
 (defun canvas-minimap--goto-y (st y)
   "Scroll the source window to the buffer line the minimap draws at Y."
   (let* ((win (canvas-minimap--state-window st))
-         ;; The click arrives in window pixels; the canvas may be finer.
-         (slot (/ (max 0 (- (* y (canvas-minimap--state-scale st))
-                            (canvas-minimap--state-top st)))
-                  (canvas-minimap--state-lh st)))
+         (slot (max 0 (canvas-minimap--row-at st y)))
          (cookies (canvas-minimap--state-cookies st))
          (line (or (and (< -1 slot (length cookies))
                         (let ((c (aref cookies slot))) (and (integerp c) c)))
@@ -3300,15 +3304,7 @@ to ask for it."
           (select-window jump)
         (canvas-minimap--hold-map st)
         (canvas-minimap--drag-step st xy)
-        (track-mouse
-          (let (ev)
-            (while (progn (setq ev (read-event))
-                          (mouse-movement-p ev))
-              (let ((posn (event-start ev)))
-                (when (canvas-minimap--minimap-window-p (posn-window posn))
-                  (when-let* ((xy (posn-object-x-y posn)))
-                    (canvas-minimap--drag-step st xy)))))
-            (when ev (push ev unread-command-events))))))))
+        (canvas-minimap--track-drag st (event-start event))))))
 
 (defun canvas-minimap--hold-map (st)
   "Hold ST's map where it is drawn, rather than where a glide was taking it.
@@ -3318,6 +3314,123 @@ glide was headed for, which a drag would jump to at once.  A glide frame
 still due does no harm: while the button is down it holds still too."
   (setf (canvas-minimap--state-anchor st) (canvas-minimap--state-start st)))
 
+(defconst canvas-minimap--edge-interval 0.05
+  "Seconds between the steps a pointer held at an edge scrolls by.")
+
+(defconst canvas-minimap--edge-start-speed 20
+  "Lines a second a pointer held at an edge scrolls at to begin with.")
+
+(defconst canvas-minimap--edge-acceleration 200
+  "Lines a second the scrolling gains for each second the edge is held.")
+
+(defun canvas-minimap--track-drag (st posn)
+  "Follow a drag on ST's map, begun at POSN, until the button comes up.
+While the pointer is held at an edge the source scrolls on that way,
+whether the mouse moves or not: at the edge of a screen it cannot, and
+a pointer that stops at an edge is asking to go on.  The speed is kept
+by the clock -- steps are due every `canvas-minimap--edge-interval'
+seconds from when the last one began, and each covers the time since --
+so a step that is slow to draw costs smoothness, never speed."
+  (let* ((mmwin (posn-window posn))
+         (edge (canvas-minimap--edge-at st (canvas-minimap--posn-y posn mmwin)))
+         (held (float-time))            ; when the pointer reached this edge
+         (last held)                    ; when the last edge step began
+         (carry 0.0)                    ; the part of a line not yet scrolled
+         ev)
+    (track-mouse
+      (while (progn (setq ev (read-event nil nil
+                                         (and edge (canvas-minimap--edge-wait
+                                                    last (float-time)))))
+                    (or (null ev) (mouse-movement-p ev)))
+        (when ev
+          (let ((was edge))
+            (setq edge (canvas-minimap--drag-motion st mmwin (event-start ev) edge))
+            (unless (eq edge was)
+              (setq held (float-time) last held carry 0.0))))
+        (let ((now (float-time)))
+          (when (and edge (>= now (+ last canvas-minimap--edge-interval)))
+            (setq carry (canvas-minimap--edge-step
+                         st edge (- now held) (- now last) carry)
+                  last now)))))
+    (when ev (push ev unread-command-events))))
+
+(defun canvas-minimap--edge-wait (last now)
+  "Seconds from NOW until the edge step after one begun at LAST is due.
+A millisecond once it is overdue, so the wait is always a short one."
+  (max 0.001 (- (+ last canvas-minimap--edge-interval) now)))
+
+(defun canvas-minimap--drag-motion (st mmwin posn edge)
+  "Follow the pointer to POSN during a drag; return the edge it is at.
+EDGE is the one it was at.  Over the map, the window is scrubbed to the
+line under the pointer.  Arriving at an edge, from inside the map or
+from the other edge, it is scrubbed there once, and from then on the
+held edge scrolls it."
+  (let* ((y (canvas-minimap--posn-y posn mmwin))
+         (now (if y (canvas-minimap--edge-at st y) edge))
+         (xy (and (eq (posn-window posn) mmwin) (posn-object-x-y posn))))
+    (when (and xy (or (null now) (not (eq now edge))))
+      (canvas-minimap--drag-step st xy))
+    now))
+
+(defun canvas-minimap--posn-y (posn mmwin)
+  "Pixel row of POSN, measured from the top of MMWIN's text, or nil.
+A pointer that leaves the map during a drag is reported against what it
+is over now: another window, or the frame itself."
+  (let ((where (posn-window posn))
+        (y (cdr (posn-x-y posn)))
+        (top (nth 1 (window-inside-pixel-edges mmwin))))
+    (when y
+      (cond ((eq where mmwin) y)
+            ((windowp where)
+             (+ y (- (nth 1 (window-inside-pixel-edges where)) top)))
+            (t (- y top))))))
+
+(defun canvas-minimap--edge-at (st y)
+  "Edge of ST's map that window pixel row Y is on or past, or nil.
+The edge is `up' or `down'.  The first and last rows count, so an edge
+can be held with nowhere further for the pointer to go: the map often
+ends where the screen does."
+  (let ((row (canvas-minimap--row-at st y)))
+    (cond ((<= row 0) 'up)
+          ((>= row (1- (canvas-minimap--state-rows st))) 'down))))
+
+(defun canvas-minimap--edge-distance (from to shown)
+  "Lines to scroll between FROM and TO seconds into holding an edge.
+The speed starts slow and gains the longer the edge is held, up to the
+SHOWN lines the window holds every step interval: a nudge moves a line
+or two, and a long buffer is crossed in seconds.  Summed over the time
+rather than read at its end, so a step that comes late covers what the
+time since the last one earned, no more and no less."
+  (let* ((start canvas-minimap--edge-start-speed)
+         (gain canvas-minimap--edge-acceleration)
+         (cap (/ (max 1 (or shown 1)) canvas-minimap--edge-interval))
+         (knee (max from (min to (/ (- cap start) gain)))))
+    (+ (* start (- knee from))
+       (* 0.5 gain (- (* knee knee) (* from from)))
+       (* cap (- to knee)))))
+
+(defun canvas-minimap--edge-advance (lines carry)
+  "Whole lines of LINES and the CARRY the last step left, and the rest.
+The part of a line is kept for the next step, so a speed of less than a
+line a step still moves, a line every few steps.  Returns (WHOLE . REST)."
+  (let* ((exact (+ carry lines))
+         (whole (floor exact)))
+    (cons whole (- exact whole))))
+
+(defun canvas-minimap--edge-step (st edge held dt carry)
+  "Scroll ST's source toward EDGE by DT seconds' worth; return the carry.
+HELD is how long the edge has been held, so the step covers the speed
+curve from HELD less DT to HELD, and CARRY is the part of a line the
+last step left over."
+  (let ((step (canvas-minimap--edge-advance
+               (canvas-minimap--edge-distance
+                (- held dt) held (canvas-minimap--state-shown st))
+               carry)))
+    (when (> (car step) 0)
+      (canvas-minimap--scroll-source st (* (if (eq edge 'up) -1 1) (car step)))
+      (redisplay))
+    (cdr step)))
+
 (defun canvas-minimap--drag-step (st xy)
   "Scrub ST's source window to XY, and show it before the next step.
 Redisplay waits while input is pending, and a drag keeps motion queued
@@ -3326,14 +3439,18 @@ pointer does."
   (canvas-minimap--scrub st xy)
   (redisplay))
 
-(defun canvas-minimap--scroll (event lines)
-  "Scroll the window EVENT's minimap belongs to by LINES."
-  (when-let* ((st (canvas-minimap--state-at event))
-              (win (canvas-minimap--state-window st)))
+(defun canvas-minimap--scroll-source (st lines)
+  "Scroll ST's source window by LINES, and bring the map up to date."
+  (let ((win (canvas-minimap--state-window st)))
     (when (window-live-p win)
       (with-selected-window win
         (condition-case nil (scroll-up lines) (error nil)))
       (canvas-minimap--update))))
+
+(defun canvas-minimap--scroll (event lines)
+  "Scroll the window EVENT's minimap belongs to by LINES."
+  (when-let* ((st (canvas-minimap--state-at event)))
+    (canvas-minimap--scroll-source st lines)))
 
 (defun canvas-minimap-scroll-up (event)
   "Scroll the source window of the minimap EVENT is over down a few lines."
