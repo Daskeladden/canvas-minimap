@@ -3297,7 +3297,11 @@ to ask for it."
   (let* ((st (canvas-minimap--state-at event))
          (xy (and st (posn-object-x-y (event-start event))))
          (sc (and st (canvas-minimap--state-scale st)))
-         (canvas-minimap--dragging t))
+         (canvas-minimap--dragging t)
+         ;; Bound so that what `canvas-minimap--hold-gc' sets is undone
+         ;; when the button comes up.
+         (gc-cons-threshold gc-cons-threshold))
+    (canvas-minimap--hold-gc)
     (when xy
       (if-let* ((jump (canvas-minimap--layout-window-at
                        st (* sc (car xy)) (* sc (cdr xy)))))
@@ -3313,6 +3317,22 @@ the middle of a glide, that is the frame on screen, not the line the
 glide was headed for, which a drag would jump to at once.  A glide frame
 still due does no harm: while the button is down it holds still too."
   (setf (canvas-minimap--state-anchor st) (canvas-minimap--state-start st)))
+
+(defconst canvas-minimap--drag-gc-threshold (* 128 1024 1024)
+  "Bytes a drag may allocate before Emacs stops it to collect garbage.
+A drag draws the map and the window many times a second, and in a
+session with a large heap each collection stops it for a tenth of a
+second or more: at the default threshold, every few steps.  A drag
+seldom outlasts a few seconds of allocation, and the collection it put
+off happens once, after the button comes up.")
+
+(defun canvas-minimap--hold-gc ()
+  "Keep garbage collection out of the drag under way.
+Set again on every step, because a timer running inside the drag may
+lower the threshold: gcmh's does, a second or two after the last
+command ended -- and to gcmh, a drag is one command that has not."
+  (setq gc-cons-threshold
+        (max gc-cons-threshold canvas-minimap--drag-gc-threshold)))
 
 (defconst canvas-minimap--edge-interval 0.05
   "Seconds between the steps a pointer held at an edge scrolls by.")
@@ -3342,6 +3362,7 @@ so a step that is slow to draw costs smoothness, never speed."
                                          (and edge (canvas-minimap--edge-wait
                                                     last (float-time)))))
                     (or (null ev) (mouse-movement-p ev)))
+        (canvas-minimap--hold-gc)
         (when ev
           (let ((was edge))
             (setq edge (canvas-minimap--drag-motion st mmwin (event-start ev) edge))

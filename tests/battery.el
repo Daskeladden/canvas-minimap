@@ -968,6 +968,47 @@ up.  The release the command hands back is dropped."
                                  moved (or earned 0) (or held 0)))))))
 
   (battery-step 0.3
+    ;; GIVEN a settled map, and the low collection threshold gcmh sets
+    ;; once Emacs has been idle a moment
+    (battery-jump 600)
+    (battery-settle)
+    (setq gc-cons-threshold 800000))
+  (battery-step 0.4
+    ;; WHEN the pointer is held at the bottom edge
+    (let ((st (battery-state))
+          (before gcs-done)
+          (held nil))
+      (run-at-time 0.55 nil (lambda () (setq held gcs-done)))
+      (battery-drag st (list (- (canvas-minimap--state-rows st) 80)
+                             (1- (canvas-minimap--state-rows st)))
+                    (lambda () nil) 0.6)
+      ;; THEN no garbage collection lands while the button is down
+      (battery-check "a drag keeps garbage collection out"
+                     (eql held before)
+                     (format "%S collections before the release"
+                             (and held (- held before))))
+      ;; AND the threshold is the one it had once the button is up
+      (battery-check "a drag leaves the collection threshold as it was"
+                     (= gc-cons-threshold 800000)
+                     (format "threshold %d after the drag" gc-cons-threshold))))
+  (battery-step 0.4
+    ;; WHEN the pointer is held there again, and a timer lowers the
+    ;; threshold partway through, the way gcmh's does
+    (let ((st (battery-state))
+          (before gcs-done)
+          (held nil))
+      (run-at-time 0.25 nil (lambda () (setq gc-cons-threshold 800000)))
+      (run-at-time 0.55 nil (lambda () (setq held gcs-done)))
+      (battery-drag st (list (- (canvas-minimap--state-rows st) 80)
+                             (1- (canvas-minimap--state-rows st)))
+                    (lambda () nil) 0.6)
+      ;; THEN that costs one collection, not one every few steps after
+      (battery-check "a lowered threshold costs a drag one collection"
+                     (and held (<= (- held before) 1))
+                     (format "%S collections before the release"
+                             (and held (- held before))))))
+
+  (battery-step 0.3
     ;; GIVEN a settled map over the lines about to change
     (battery-jump 604)
     (battery-settle)
